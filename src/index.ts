@@ -42,14 +42,21 @@ const asks: Order[] = [];
 // Place a limit order
 app.post("/order", (req: any, res: any) => {
   const side: string = req.body.side;
+  const type: string = req.body.type || "limit";
   const price: number = req.body.price;
   const quantity: number = req.body.quantity;
   const userId: string = req.body.userId;
+  const isMarket = type === "market";
 
-  const remainingQty = fillOrders(side, price, quantity, userId);
+  const remainingQty = fillOrders(side, price, quantity, userId, isMarket);
 
   if (remainingQty === 0) {
     res.json({ filledQuantity: quantity });
+    return;
+  }
+
+  if (isMarket) {
+    res.json({ filledQuantity: quantity - remainingQty });
     return;
   }
 
@@ -121,9 +128,34 @@ app.get("/balance/:userId", (req, res) => {
   res.json({ balances: user.balances });
 })
 
-app.get("/quote", (req, res) => {
-  // TODO: Assignment
-});
+function getQuote(side: string, quantity: number): number {
+  const orders = side === "bid" ? asks : bids;
+  let remainingQuantity = quantity;
+  let quote = 0;
+
+  for (let i = orders.length - 1; i >= 0 && remainingQuantity > 0; i--) {
+    const filledQuantity = Math.min(orders[i].quantity, remainingQuantity);
+    quote += filledQuantity * orders[i].price;
+    remainingQuantity -= filledQuantity;
+  }
+
+  return quote;
+}
+
+function quoteHandler(req: any, res: any) {
+  const body = req.body || {};
+  const side = body.side || req.query.side;
+  const quantity = Number(body.quantity || req.query.quantity);
+
+  if ((side !== "bid" && side !== "ask") || !Number.isFinite(quantity) || quantity <= 0) {
+    return res.status(400).json({ quote: 0 });
+  }
+
+  res.json({ quote: getQuote(side, quantity) });
+}
+
+app.post("/quote", quoteHandler);
+app.get("/quote", quoteHandler);
 
 function flipBalance(userId1: string, userId2: string, quantity: number, price: number) {
   let user1 = users.find(x => x.id === userId1);
@@ -137,36 +169,32 @@ function flipBalance(userId1: string, userId2: string, quantity: number, price: 
   user2.balances["USD"] -= (quantity * price);
 }
 
-function fillOrders(side: string, price: number, quantity: number, userId: string): number {
+function fillOrders(side: string, price: number, quantity: number, userId: string, isMarket = false): number {
   let remainingQuantity = quantity;
   if (side === "bid") {
-    for (let i = asks.length - 1; i >= 0; i--) {
-      if (asks[i].price > price) {
+    for (let i = asks.length - 1; i >= 0 && remainingQuantity > 0; i--) {
+      if (!isMarket && asks[i].price > price) {
         continue;
       }
-      if (asks[i].quantity > remainingQuantity) {
-        asks[i].quantity -= remainingQuantity;
-        flipBalance(asks[i].userId, userId, remainingQuantity, asks[i].price);
-        return 0;
-      } else {
-        remainingQuantity -= asks[i].quantity;
-        flipBalance(asks[i].userId, userId, asks[i].quantity, asks[i].price);
-        asks.pop();
+      const filledQuantity = Math.min(asks[i].quantity, remainingQuantity);
+      asks[i].quantity -= filledQuantity;
+      flipBalance(asks[i].userId, userId, filledQuantity, asks[i].price);
+      remainingQuantity -= filledQuantity;
+      if (asks[i].quantity === 0) {
+        asks.splice(i, 1);
       }
     }
   } else {
-    for (let i = bids.length - 1; i >= 0; i--) {
-      if (bids[i].price < price) {
+    for (let i = bids.length - 1; i >= 0 && remainingQuantity > 0; i--) {
+      if (!isMarket && bids[i].price < price) {
         continue;
       }
-      if (bids[i].quantity > remainingQuantity) {
-        bids[i].quantity -= remainingQuantity;
-        flipBalance(userId, bids[i].userId, remainingQuantity, price);
-        return 0;
-      } else {
-        remainingQuantity -= bids[i].quantity;
-        flipBalance(userId, bids[i].userId, bids[i].quantity, price);
-        bids.pop();
+      const filledQuantity = Math.min(bids[i].quantity, remainingQuantity);
+      bids[i].quantity -= filledQuantity;
+      flipBalance(userId, bids[i].userId, filledQuantity, bids[i].price);
+      remainingQuantity -= filledQuantity;
+      if (bids[i].quantity === 0) {
+        bids.splice(i, 1);
       }
     }
   }
